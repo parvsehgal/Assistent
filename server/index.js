@@ -1,7 +1,7 @@
 const WebSocket = require("ws");
 const http = require("http");
 
-const gptKey = "your Key here";
+const gptKey = "your-API-Key";
 
 const server = http.createServer();
 
@@ -25,30 +25,36 @@ wss.on("connection", (ws) => {
     ws.send("your gpt client is ready for u to use");
   });
   //when out gpt client gets a message from the openai server
-  gptClient.on("message", (messageRecieved) => {
-    const parsedMessage = JSON.parse(messageRecieved.toString());
-    ws.send(JSON.stringify(parsedMessage));
+  gptClient.on("message", (data) => {
+    // Convert Buffer to string if data is binary
+    let messageStr;
+    if (Buffer.isBuffer(data)) {
+      messageStr = data.toString("utf-8");
+      ws.send(messageStr);
+    } else if (typeof data === "string") {
+      ws.send(data);
+    } else {
+      console.warn("Received unsupported data type from OpenAI:", typeof data);
+    }
   });
   // Handle messages from the client
   ws.on("message", (message) => {
-    //we will pass these messages to the gpt client and wait for a response
-    const userMessage = Buffer.isBuffer(message) ? message.toString() : message;
-    console.log(userMessage);
-    const event = {
-      type: "conversation.item.create",
-      item: {
-        type: "message",
-        role: "user",
-        content: [
-          {
-            type: "input_text",
-            text: userMessage,
-          },
-        ],
-      },
-    };
-    gptClient.send(JSON.stringify(event));
-    gptClient.send(JSON.stringify({ type: "response.create" }));
+    try {
+      const event = JSON.parse(message);
+      // Forward the event to OpenAI's WebSocket
+      gptClient.send(JSON.stringify(event));
+    } catch (e) {
+      console.error("Error parsing message from client:", e);
+      // Optionally, send an error back to the client
+      const errorEvent = {
+        type: "error",
+        error: {
+          message: "Invalid JSON format sent to server.",
+          details: e.message,
+        },
+      };
+      ws.send(JSON.stringify(errorEvent));
+    }
   });
 });
 

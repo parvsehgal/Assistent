@@ -1,9 +1,15 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useRef } from "react";
 
 export default function Home() {
   const [isConnected, setIsConnected] = useState(false);
   const [socket, setSocket] = useState(null);
   const [words, setWords] = useState("");
+  const [messages, setMessages] = useState([]);
+  const [isRecording, setIsRecording] = useState(false);
+  const mediaRecorderRef = useRef(null);
+
+  const audioChunksRef = useRef([]);
+
   // Function to connect to the WebSocket server
   const connectToAssistant = () => {
     // Create a new WebSocket connection
@@ -31,7 +37,6 @@ export default function Home() {
         }
       } else {
         console.warn("Received non-JSON message:", message);
-        // Handle non-JSON messages if needed
       }
     };
 
@@ -44,6 +49,7 @@ export default function Home() {
         return false;
       }
     };
+
     // When the connection is closed
     ws.onclose = () => {
       console.log("WebSocket connection closed");
@@ -67,19 +73,205 @@ export default function Home() {
       console.error("WebSocket is not open.");
     }
   };
-  //function to play the audio
-  const playAudio = () => {
-    console.log("the audio is being played");
-    console.log(words);
-    const utterance = new SpeechSynthesisUtterance(words);
 
-    // Optionally, you can set properties like pitch, rate, and voice
-    utterance.pitch = 1; // Default pitch
-    utterance.rate = 1; // Default rate
-
-    // Speak the utterance
-    window.speechSynthesis.speak(utterance);
+  const closeConnection = () => {
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.close();
+    }
   };
+
+  const startRecording = async () => {
+    setIsRecording(true);
+    audioChunksRef.current = [];
+
+    try {
+      // Request microphone access
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mediaRecorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = mediaRecorder;
+
+      mediaRecorder.start();
+
+      mediaRecorder.onstart = () => {
+        console.log("Recording started");
+        setMessages((prev) => [
+          ...prev,
+          { role: "system", text: "Recording started..." },
+        ]);
+      };
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+
+      mediaRecorder.onstop = () => {
+        console.log("Recording stopped");
+        setMessages((prev) => [
+          ...prev,
+          { role: "system", text: "Processing audio..." },
+        ]);
+        processAudio();
+      };
+    } catch (error) {
+      console.error("Error accessing microphone:", error);
+      setIsRecording(false);
+      setMessages((prev) => [
+        ...prev,
+        { role: "system", text: "Microphone access denied or unavailable." },
+      ]);
+    }
+  };
+
+  const processAudio = async () => {
+    const blob = new Blob(audioChunksRef.current, { type: "audio/wav" });
+
+    // Process the audio to PCM16 mono 24kHz using AudioContext
+    const processedBase64Audio = await convertBlobToPCM16Mono24kHz(blob);
+
+    if (!processedBase64Audio) {
+      console.error("Audio processing failed.");
+      setMessages((prev) => [
+        ...prev,
+        { role: "system", text: "Failed to process audio." },
+      ]);
+      return;
+    }
+
+    // Send the audio event to the backend via WebSocket
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      const conversationCreateEvent = {
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "user",
+          content: [
+            {
+              type: "input_audio",
+              audio: processedBase64Audio,
+            },
+          ],
+        },
+      };
+      socket.send(JSON.stringify(conversationCreateEvent));
+
+      // Optionally, add the user's audio message to the UI
+      setMessages((prev) => [
+        ...prev,
+        { role: "user", audio: processedBase64Audio },
+      ]);
+
+      // Trigger a response.create event to prompt assistant's response
+      const responseCreateEvent = {
+        type: "response.create",
+        response: {
+          modalities: ["text", "audio"], // Include audio modality
+        },
+      };
+      socket.send(JSON.stringify(responseCreateEvent));
+
+      setMessages((prev) => [
+        ...prev,
+        { role: "system", text: "Audio sent to assistant for processing." },
+      ]);
+    } else {
+      console.error("WebSocket is not open.");
+      setMessages((prev) => [
+        ...prev,
+        { role: "system", text: "Unable to send audio. Connection is closed." },
+      ]);
+    }
+  };
+
+  const convertBlobToPCM16Mono24kHz = async (blob) => {
+    try {
+      // Initialize AudioContext with target sample rate
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)({
+        sampleRate: 24000, // Target sample rate
+      });
+
+      // Decode the audio data
+      const arrayBuffer = await blob.arrayBuffer();
+      const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+
+      // Downmix to mono if necessary
+      let channelData =
+        audioBuffer.numberOfChannels > 1
+          ? averageChannels(
+            audioBuffer.getChannelData(0),
+            audioBuffer.getChannelData(1),
+          )
+          : audioBuffer.getChannelData(0);
+
+      // Convert Float32Array to PCM16
+      const pcm16Buffer = float32ToPCM16(channelData);
+
+      // Base64 encode the PCM16 buffer
+      const base64Audio = arrayBufferToBase64(pcm16Buffer);
+
+      // Close the AudioContext to free resources
+      audioCtx.close();
+
+      return base64Audio;
+    } catch (error) {
+      console.error("Error processing audio:", error);
+      return null;
+    }
+  };
+
+  /**
+   * Averages two Float32Arrays to produce a mono channel.
+   * @param {Float32Array} channel1 - First channel data.
+   * @param {Float32Array} channel2 - Second channel data.
+   * @returns {Float32Array} - Averaged mono channel data.
+   */
+  const averageChannels = (channel1, channel2) => {
+    const length = Math.min(channel1.length, channel2.length);
+    const result = new Float32Array(length);
+    for (let i = 0; i < length; i++) {
+      result[i] = (channel1[i] + channel2[i]) / 2;
+    }
+    return result;
+  };
+
+  /**
+   * Converts a Float32Array of audio samples to a PCM16 ArrayBuffer.
+   * @param {Float32Array} float32Array - The audio samples.
+   * @returns {ArrayBuffer} - The PCM16 encoded audio.
+   */
+  const float32ToPCM16 = (float32Array) => {
+    const buffer = new ArrayBuffer(float32Array.length * 2);
+    const view = new DataView(buffer);
+    for (let i = 0; i < float32Array.length; i++) {
+      let s = Math.max(-1, Math.min(1, float32Array[i]));
+      s = s < 0 ? s * 0x8000 : s * 0x7fff;
+      view.setInt16(i * 2, s, true); // little-endian
+    }
+    return buffer;
+  };
+
+  /**
+   * Converts an ArrayBuffer or Uint8Array to a base64-encoded string.
+   * @param {ArrayBuffer | Uint8Array} buffer - The buffer to encode.
+   * @returns {string} - The base64-encoded string.
+   */
+  const arrayBufferToBase64 = (buffer) => {
+    let binary = "";
+    const bytes = new Uint8Array(buffer);
+    const len = bytes.byteLength;
+    for (let i = 0; i < len; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+  };
+  const stopRecording = () => {
+    setIsRecording(false);
+    if (mediaRecorderRef.current) {
+      mediaRecorderRef.current.stop();
+    }
+  };
+
   return (
     <div className="flex flex-col items-center justify-center min-h-screen bg-gray-100">
       {/* Display button based on connection state */}
@@ -93,12 +285,17 @@ export default function Home() {
       ) : (
         <div>
           <button
-            className="px-6 py-3 font-semibold text-white bg-red-500 rounded-lg hover:bg-red-600"
-            onClick={() => sendMessage("can u explain it a little to me")}
+            className="px-6 py-3 font-semibold text-white bg-purple-500 rounded-lg hover:bg-purple-600"
+            onClick={isRecording ? stopRecording : startRecording} // Corrected the toggle function
           >
-            click to send a premade question tochatgpt
+            {isRecording ? "Stop Recording" : "Start Recording"}
           </button>
-          <button onClick={playAudio}>press this button to play audio</button>
+          <button
+            className="px-6 py-3 font-semibold text-white bg-red-500 rounded-lg hover:bg-red-600"
+            onClick={closeConnection}
+          >
+            Close Connection to Assistant
+          </button>
         </div>
       )}
     </div>
