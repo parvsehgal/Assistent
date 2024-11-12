@@ -1,7 +1,7 @@
 const WebSocket = require("ws");
 const http = require("http");
-
-const gptKey = "your-API-Key";
+const helper = require("./utils/audiofunctions.js");
+const gptKey = "your-Api-Key";
 
 const server = http.createServer();
 
@@ -27,14 +27,19 @@ wss.on("connection", (ws) => {
   //when out gpt client gets a message from the openai server
   gptClient.on("message", (data) => {
     // Convert Buffer to string if data is binary
-    let messageStr;
-    if (Buffer.isBuffer(data)) {
-      messageStr = data.toString("utf-8");
-      ws.send(messageStr);
-    } else if (typeof data === "string") {
-      ws.send(data);
+    const parsedData = JSON.parse(data);
+    console.log(parsedData.type);
+    if (parsedData.type === "response.audio.delta") {
+      const pcmData = helper.base64ToArrayBuffer(parsedData.delta);
+      const sampleRate = 24000;
+      const header = helper.createWavHeader(sampleRate, pcmData.byteLength);
+      const finalAudioBuffer = helper.concatenateWavHeaderAndData(
+        header,
+        pcmData,
+      );
+      ws.send(finalAudioBuffer);
     } else {
-      console.warn("Received unsupported data type from OpenAI:", typeof data);
+      ws.send(JSON.stringify(parsedData));
     }
   });
   // Handle messages from the client

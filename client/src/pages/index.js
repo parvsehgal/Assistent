@@ -10,6 +10,8 @@ export default function Home() {
 
   const audioChunksRef = useRef([]);
 
+  const audioDataRef = useRef([]);
+
   // Function to connect to the WebSocket server
   const connectToAssistant = () => {
     // Create a new WebSocket connection
@@ -21,7 +23,7 @@ export default function Home() {
       setIsConnected(true);
     };
 
-    ws.onmessage = (event) => {
+    ws.onmessage = async (event) => {
       const message = event.data;
       // Check if the message looks like JSON
       if (isJsonString(message)) {
@@ -29,6 +31,9 @@ export default function Home() {
           const jsonMessage = JSON.parse(message);
           console.log("Parsed JSON message:", jsonMessage);
           if (jsonMessage.type === "response.done") {
+            for (let i = 0; i < audioDataRef.current.length; i++) {
+              await playAudioFromArrayBuffer(audioDataRef.current[i]);
+            }
             console.log(message);
             setWords(jsonMessage.response.output[0].content[0].transcript);
           }
@@ -36,11 +41,48 @@ export default function Home() {
           console.error("Error parsing JSON:", error);
         }
       } else {
-        console.warn("Received non-JSON message:", message);
+        console.warn("Received non-JSON message:", event);
+        if (event.data instanceof Blob) {
+          console.log("got a blobyy blob blob");
+          const arrayBuffer = await event.data.arrayBuffer();
+          console.log(arrayBuffer);
+          audioDataRef.current.push(arrayBuffer);
+        }
       }
     };
 
-    // Utility function to check if a string is valid JSON
+    const playAudioFromArrayBuffer = (audioBuffer) => {
+      return new Promise((resolve, reject) => {
+        const audioContext = new (window.AudioContext ||
+          window.webkitAudioContext)();
+
+        // Decode the audio data
+        audioContext.decodeAudioData(
+          audioBuffer,
+          (buffer) => {
+            const source = audioContext.createBufferSource();
+            source.buffer = buffer;
+            source.connect(audioContext.destination);
+
+            // Set playback rate (e.g., 0.5 for slower, 2 for faster)
+            source.playbackRate.value = 1.0; // Adjust this as needed
+
+            // On 'ended' event, resolve the promise to move to the next one
+            source.onended = () => {
+              resolve(); // Audio finished playing
+            };
+
+            // Start the audio playback
+            source.start(0);
+          },
+          (error) => {
+            reject("Error decoding audio data: " + error);
+          },
+        );
+      });
+    };
+
+    // to check if a response is valid jsonString
     const isJsonString = (str) => {
       try {
         JSON.parse(str);
@@ -62,16 +104,6 @@ export default function Home() {
     };
 
     setSocket(ws);
-  };
-
-  // Function to send a message to the WebSocket server
-  const sendMessage = (message) => {
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(message);
-      console.log("Sent message:", message);
-    } else {
-      console.error("WebSocket is not open.");
-    }
   };
 
   const closeConnection = () => {
@@ -141,6 +173,7 @@ export default function Home() {
 
     // Send the audio event to the backend via WebSocket
     if (socket && socket.readyState === WebSocket.OPEN) {
+      audioDataRef.current = [];
       const conversationCreateEvent = {
         type: "conversation.item.create",
         item: {
