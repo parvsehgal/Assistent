@@ -1,15 +1,14 @@
 const WebSocket = require("ws");
 const http = require("http");
 const helper = require("./utils/audiofunctions.js");
-const gptKey = "your-Api-Key";
-
 const server = http.createServer();
-
+require("dotenv").config();
+const gptKey = process.env.KEY;
 const wss = new WebSocket.Server({ noServer: true });
 
 wss.on("connection", (ws) => {
   console.log("Client connected to /Assistant");
-
+  console.log(process.env.KEY);
   //generate a gpt ws client for our user
   const url =
     "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01";
