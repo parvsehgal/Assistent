@@ -1,6 +1,11 @@
 import { useState, useRef } from "react";
+import { LiveAudioVisualizer } from "react-audio-visualize";
 
 export default function Home() {
+  //for audio Visualizer
+  const [MEDIAREC, setMEDIAREC] = useState([]);
+
+  //
   const [isConnected, setIsConnected] = useState(false);
   const [socket, setSocket] = useState(null);
   const [words, setWords] = useState("");
@@ -120,6 +125,7 @@ export default function Home() {
       // Request microphone access
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const mediaRecorder = new MediaRecorder(stream);
+      setMEDIAREC(mediaRecorder);
       mediaRecorderRef.current = mediaRecorder;
 
       mediaRecorder.start();
@@ -232,9 +238,9 @@ export default function Home() {
       let channelData =
         audioBuffer.numberOfChannels > 1
           ? averageChannels(
-            audioBuffer.getChannelData(0),
-            audioBuffer.getChannelData(1),
-          )
+              audioBuffer.getChannelData(0),
+              audioBuffer.getChannelData(1),
+            )
           : audioBuffer.getChannelData(0);
 
       // Convert Float32Array to PCM16
@@ -329,6 +335,15 @@ export default function Home() {
           >
             Close Connection to Assistant
           </button>
+          <div>
+            {MEDIAREC && (
+              <LiveAudioVisualizer
+                mediaRecorder={MEDIAREC}
+                width={200}
+                height={75}
+              />
+            )}
+          </div>
         </div>
       )}
     </div>
