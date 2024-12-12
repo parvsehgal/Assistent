@@ -2,10 +2,8 @@ import { useState, useRef } from "react";
 import { LiveAudioVisualizer } from "react-audio-visualize";
 
 export default function Home() {
-  //for audio Visualizer
   const [MEDIAREC, setMEDIAREC] = useState([]);
-
-  //
+  const canvasRef = useRef(null);
   const [isConnected, setIsConnected] = useState(false);
   const [socket, setSocket] = useState(null);
   const [words, setWords] = useState("");
@@ -14,15 +12,12 @@ export default function Home() {
   const mediaRecorderRef = useRef(null);
 
   const audioChunksRef = useRef([]);
-
   const audioDataRef = useRef([]);
 
-  // Function to connect to the WebSocket server
-  const connectToAssistant = () => {
-    // Create a new WebSocket connection
-    const ws = new WebSocket("ws://localhost:4000/Assistant");
+  const [isResponsePlaying, setResPlaying] = useState(false);
 
-    // When the connection is opened
+  const connectToAssistant = () => {
+    const ws = new WebSocket("ws://localhost:4000/Assistant");
     ws.onopen = () => {
       console.log("Connected to WebSocket server");
       setIsConnected(true);
@@ -30,27 +25,22 @@ export default function Home() {
 
     ws.onmessage = async (event) => {
       const message = event.data;
-      // Check if the message looks like JSON
       if (isJsonString(message)) {
         try {
           const jsonMessage = JSON.parse(message);
-          console.log("Parsed JSON message:", jsonMessage);
           if (jsonMessage.type === "response.done") {
+            setResPlaying(false);
             for (let i = 0; i < audioDataRef.current.length; i++) {
               await playAudioFromArrayBuffer(audioDataRef.current[i]);
             }
-            console.log(message);
             setWords(jsonMessage.response.output[0].content[0].transcript);
           }
         } catch (error) {
           console.error("Error parsing JSON:", error);
         }
       } else {
-        console.warn("Received non-JSON message:", event);
         if (event.data instanceof Blob) {
-          console.log("got a blobyy blob blob");
           const arrayBuffer = await event.data.arrayBuffer();
-          console.log(arrayBuffer);
           audioDataRef.current.push(arrayBuffer);
         }
       }
@@ -60,24 +50,59 @@ export default function Home() {
       return new Promise((resolve, reject) => {
         const audioContext = new (window.AudioContext ||
           window.webkitAudioContext)();
-
-        // Decode the audio data
         audioContext.decodeAudioData(
           audioBuffer,
           (buffer) => {
             const source = audioContext.createBufferSource();
             source.buffer = buffer;
-            source.connect(audioContext.destination);
 
-            // Set playback rate (e.g., 0.5 for slower, 2 for faster)
-            source.playbackRate.value = 1.0; // Adjust this as needed
+            // Create an analyser node
+            const analyser = audioContext.createAnalyser();
+            analyser.fftSize = 256;
+            const bufferLength = analyser.frequencyBinCount;
+            const dataArray = new Uint8Array(bufferLength);
 
-            // On 'ended' event, resolve the promise to move to the next one
-            source.onended = () => {
-              resolve(); // Audio finished playing
+            // Connect the source to the analyser and the analyser to the destination (speakers)
+            source.connect(analyser);
+            analyser.connect(audioContext.destination);
+
+            // Visualization function
+            const draw = () => {
+              analyser.getByteFrequencyData(dataArray);
+              const canvas = canvasRef.current;
+              if (canvas) {
+                const canvasContext = canvas.getContext("2d");
+                if (canvasContext) {
+                  canvasContext.clearRect(0, 0, canvas.width, canvas.height);
+
+                  const barWidth = (canvas.width / bufferLength) * 2.5;
+                  let x = 0;
+                  for (let i = 0; i < bufferLength; i++) {
+                    const barHeight = dataArray[i];
+                    canvasContext.fillStyle = "rgb(150, 150, 255)"; // Darker lavender color
+                    canvasContext.fillRect(
+                      x,
+                      canvas.height - barHeight,
+                      barWidth,
+                      barHeight,
+                    );
+                    x += barWidth + 1;
+                  }
+
+                  // Continue drawing
+                  if (canvasRef.current && canvasRef.current.getContext) {
+                    requestAnimationFrame(draw);
+                  }
+                }
+              }
             };
 
-            // Start the audio playback
+            draw();
+
+            source.onended = () => {
+              resolve();
+            };
+
             source.start(0);
           },
           (error) => {
@@ -87,7 +112,6 @@ export default function Home() {
       });
     };
 
-    // to check if a response is valid jsonString
     const isJsonString = (str) => {
       try {
         JSON.parse(str);
@@ -97,13 +121,11 @@ export default function Home() {
       }
     };
 
-    // When the connection is closed
     ws.onclose = () => {
       console.log("WebSocket connection closed");
       setIsConnected(false);
     };
 
-    // Handle errors
     ws.onerror = (error) => {
       console.error("WebSocket error:", error);
     };
@@ -122,7 +144,6 @@ export default function Home() {
     audioChunksRef.current = [];
 
     try {
-      // Request microphone access
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const mediaRecorder = new MediaRecorder(stream);
       setMEDIAREC(mediaRecorder);
@@ -162,6 +183,14 @@ export default function Home() {
     }
   };
 
+  const stopRecording = () => {
+    setIsRecording(false);
+    if (mediaRecorderRef.current) {
+      mediaRecorderRef.current.stop();
+    }
+    setResPlaying(true);
+  };
+
   const processAudio = async () => {
     const blob = new Blob(audioChunksRef.current, { type: "audio/wav" });
 
@@ -195,17 +224,15 @@ export default function Home() {
       };
       socket.send(JSON.stringify(conversationCreateEvent));
 
-      // Optionally, add the user's audio message to the UI
       setMessages((prev) => [
         ...prev,
         { role: "user", audio: processedBase64Audio },
       ]);
 
-      // Trigger a response.create event to prompt assistant's response
       const responseCreateEvent = {
         type: "response.create",
         response: {
-          modalities: ["text", "audio"], // Include audio modality
+          modalities: ["text", "audio"],
         },
       };
       socket.send(JSON.stringify(responseCreateEvent));
@@ -225,31 +252,24 @@ export default function Home() {
 
   const convertBlobToPCM16Mono24kHz = async (blob) => {
     try {
-      // Initialize AudioContext with target sample rate
       const audioCtx = new (window.AudioContext || window.webkitAudioContext)({
-        sampleRate: 24000, // Target sample rate
+        sampleRate: 24000,
       });
 
-      // Decode the audio data
       const arrayBuffer = await blob.arrayBuffer();
       const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
 
-      // Downmix to mono if necessary
       let channelData =
         audioBuffer.numberOfChannels > 1
           ? averageChannels(
-              audioBuffer.getChannelData(0),
-              audioBuffer.getChannelData(1),
-            )
+            audioBuffer.getChannelData(0),
+            audioBuffer.getChannelData(1),
+          )
           : audioBuffer.getChannelData(0);
 
-      // Convert Float32Array to PCM16
       const pcm16Buffer = float32ToPCM16(channelData);
-
-      // Base64 encode the PCM16 buffer
       const base64Audio = arrayBufferToBase64(pcm16Buffer);
 
-      // Close the AudioContext to free resources
       audioCtx.close();
 
       return base64Audio;
@@ -259,12 +279,6 @@ export default function Home() {
     }
   };
 
-  /**
-   * Averages two Float32Arrays to produce a mono channel.
-   * @param {Float32Array} channel1 - First channel data.
-   * @param {Float32Array} channel2 - Second channel data.
-   * @returns {Float32Array} - Averaged mono channel data.
-   */
   const averageChannels = (channel1, channel2) => {
     const length = Math.min(channel1.length, channel2.length);
     const result = new Float32Array(length);
@@ -274,76 +288,92 @@ export default function Home() {
     return result;
   };
 
-  /**
-   * Converts a Float32Array of audio samples to a PCM16 ArrayBuffer.
-   * @param {Float32Array} float32Array - The audio samples.
-   * @returns {ArrayBuffer} - The PCM16 encoded audio.
-   */
   const float32ToPCM16 = (float32Array) => {
     const buffer = new ArrayBuffer(float32Array.length * 2);
     const view = new DataView(buffer);
     for (let i = 0; i < float32Array.length; i++) {
       let s = Math.max(-1, Math.min(1, float32Array[i]));
       s = s < 0 ? s * 0x8000 : s * 0x7fff;
-      view.setInt16(i * 2, s, true); // little-endian
+      view.setInt16(i * 2, s, true);
     }
     return buffer;
   };
 
-  /**
-   * Converts an ArrayBuffer or Uint8Array to a base64-encoded string.
-   * @param {ArrayBuffer | Uint8Array} buffer - The buffer to encode.
-   * @returns {string} - The base64-encoded string.
-   */
   const arrayBufferToBase64 = (buffer) => {
     let binary = "";
     const bytes = new Uint8Array(buffer);
-    const len = bytes.byteLength;
-    for (let i = 0; i < len; i++) {
+    const length = bytes.byteLength;
+    for (let i = 0; i < length; i++) {
       binary += String.fromCharCode(bytes[i]);
     }
-    return btoa(binary);
-  };
-  const stopRecording = () => {
-    setIsRecording(false);
-    if (mediaRecorderRef.current) {
-      mediaRecorderRef.current.stop();
-    }
+    return window.btoa(binary);
   };
 
   return (
-    <div className="flex flex-col items-center justify-center min-h-screen bg-gray-100">
-      {/* Display button based on connection state */}
+    <div className="flex flex-col items-center justify-center min-h-screen bg-gradient-to-br from-gray-100 to-gray-300 relative">
       {!isConnected ? (
-        <button
-          className="px-6 py-3 font-semibold text-white bg-blue-500 rounded-lg hover:bg-blue-600"
-          onClick={connectToAssistant}
-        >
-          Connect to Assistant
-        </button>
-      ) : (
-        <div>
+        <div className="flex flex-col items-center space-y-6">
+          <h1 className="text-2xl font-bold text-gray-800">
+            Welcome to the Assistant
+          </h1>
           <button
-            className="px-6 py-3 font-semibold text-white bg-purple-500 rounded-lg hover:bg-purple-600"
-            onClick={isRecording ? stopRecording : startRecording} // Corrected the toggle function
+            className="px-8 py-4 text-lg font-semibold text-white bg-blue-600 rounded-full shadow-lg hover:bg-blue-700 transition-all"
+            onClick={connectToAssistant}
+          >
+            Connect to Assistant
+          </button>
+        </div>
+      ) : (
+        <div className="flex flex-col items-center space-y-8">
+          <button
+            className={`px-8 py-4 text-lg font-semibold text-white rounded-full shadow-lg transition-all ${isRecording
+                ? "bg-red-500 hover:bg-red-600"
+                : "bg-green-500 hover:bg-green-600"
+              }`}
+            onClick={isRecording ? stopRecording : startRecording}
           >
             {isRecording ? "Stop Recording" : "Start Recording"}
           </button>
+
+          {/* Close Connection Button */}
           <button
-            className="px-6 py-3 font-semibold text-white bg-red-500 rounded-lg hover:bg-red-600"
+            className="absolute left-6 bottom-6 px-6 py-3 text-sm font-medium text-white bg-red-500 rounded-lg shadow-md hover:bg-red-600 transition-all"
             onClick={closeConnection}
           >
-            Close Connection to Assistant
+            Close Connection
           </button>
-          <div>
+
+          {/* Visualizations */}
+          <div className="flex flex-col items-center space-y-4">
             {MEDIAREC && (
-              <LiveAudioVisualizer
-                mediaRecorder={MEDIAREC}
-                width={200}
-                height={75}
-              />
+              <div className="p-4 bg-white rounded-lg shadow-md">
+                <LiveAudioVisualizer
+                  mediaRecorder={MEDIAREC}
+                  width={300}
+                  height={100}
+                />
+              </div>
             )}
+
+            <canvas
+              ref={canvasRef}
+              width={500}
+              height={100}
+              className="border border-gray-300 rounded-md shadow-sm"
+            ></canvas>
           </div>
+
+          {/* Loader */}
+          {isResponsePlaying ? (
+            <div className="absolute top-6 right-6 flex items-center space-x-2">
+              <div className="w-4 h-4 rounded-full bg-blue-600 animate-ping"></div>
+              <span className="text-sm font-medium text-gray-700">
+                Assistant is Thinking...
+              </span>
+            </div>
+          ) : (
+            <div></div>
+          )}
         </div>
       )}
     </div>
